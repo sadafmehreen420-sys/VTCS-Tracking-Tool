@@ -15,9 +15,14 @@ module = st.sidebar.radio(
     ["VTCS & GPS Audit", "Image Verification"]
 )
 if module == "VTCS & GPS Audit":
-   elif module == "Image Verification":
+    # your VTCS code here
 
-    st.title("🖼️ VTCS Image Verification")
+elif module == "Image Verification":
+    # your image processing UI here
+
+else:
+    st.write("Select a module")
+
 
     before_file = st.file_uploader("Upload BEFORE Image", type=["jpg", "png"])
     after_file = st.file_uploader("Upload AFTER Image", type=["jpg", "png"])
