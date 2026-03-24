@@ -15,7 +15,7 @@ module = st.sidebar.radio(
     ["VTCS & GPS Audit", "Image Verification"]
 )
 if module == "VTCS & GPS Audit":
-    else if module == "Image Verification":
+   elif module == "Image Verification":
 
     st.title("🖼️ VTCS Image Verification")
 
