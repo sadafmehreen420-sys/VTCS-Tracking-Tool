@@ -1,15 +1,41 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from image_module import process_images
 
 # Page Configuration
 st.set_page_config(page_title="VTCS & GPS Auditor", layout="wide")
 st.title("🚛 VTCS & GPS Tracking Auditor")
 
 # --- SIDEBAR: FILE UPLOADS ---
-st.sidebar.header("Upload Data")
-vtcs_file = st.sidebar.file_uploader("1. Upload VTCS Data (Excel/CSV)", type=['xlsx', 'csv'])
-tracking_file = st.sidebar.file_uploader("2. Upload Tracking Report (Excel/CSV)", type=['xlsx', 'csv'])
+st.sidebar.title("Navigation")
+
+module = st.sidebar.radio(
+    "Select Module",
+    ["VTCS & GPS Audit", "Image Verification"]
+)
+if module == "VTCS & GPS Audit":
+    elif module == "Image Verification":
+
+    st.title("🖼️ VTCS Image Verification")
+
+    before_file = st.file_uploader("Upload BEFORE Image", type=["jpg", "png"])
+    after_file = st.file_uploader("Upload AFTER Image", type=["jpg", "png"])
+
+    activity_time = st.datetime_input("Select Activity Time")
+
+    if st.button("Verify Images"):
+
+        if before_file and after_file:
+
+            result = process_images(before_file, after_file, activity_time)
+
+            st.success(f"Status: {result['status']}")
+            st.write(f"Image Difference Score: {result['difference']}")
+            st.write(f"Time Difference (minutes): {result['time_diff']}")
+
+        else:
+            st.warning("Please upload both images")
 
 def process_audit(vtcs_df, track_df=None):
     # --- 1. VTCS PROCESSING ---
