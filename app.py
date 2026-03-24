@@ -107,3 +107,137 @@ if vtcs_file:
 
 else:
     st.info("Please upload your VTCS file from the sidebar to start.")
+
+
+
+
+
+
+
+import streamlit as st
+import cv2
+import numpy as np
+from PIL import Image
+import imagehash
+import io
+from datetime import datetime
+from sqlalchemy import create_engine, Column, Integer, String, Float
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+
+# ---------------- DB SETUP ----------------
+engine = create_engine("sqlite:///vtcs.db")
+Session = sessionmaker(bind=engine)
+Base = declarative_base()
+
+class Record(Base):
+    __tablename__ = "records"
+    id = Column(Integer, primary_key=True)
+    before_hash = Column(String)
+    after_hash = Column(String)
+    difference = Column(Float)
+    time_diff = Column(Float)
+    status = Column(String)
+
+Base.metadata.create_all(engine)
+
+# ---------------- FUNCTIONS ----------------
+
+def get_hash(img_bytes):
+    img = Image.open(io.BytesIO(img_bytes))
+    return str(imagehash.phash(img))
+
+def compare_images(img1_bytes, img2_bytes):
+    img1 = cv2.imdecode(np.frombuffer(img1_bytes, np.uint8), 1)
+    img2 = cv2.imdecode(np.frombuffer(img2_bytes, np.uint8), 1)
+
+    img1 = cv2.resize(img1, (400, 400))
+    img2 = cv2.resize(img2, (400, 400))
+
+    diff = cv2.absdiff(img1, img2)
+    gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+
+    return float(np.mean(gray))
+
+# ---------------- UI ----------------
+
+st.title("🚛 VTCS Image Verification Dashboard")
+
+st.subheader("Upload Before & After Images")
+
+before_file = st.file_uploader("Upload BEFORE Image", type=["jpg", "png"])
+after_file = st.file_uploader("Upload AFTER Image", type=["jpg", "png"])
+
+activity_time = st.datetime_input("Select Activity Time")
+
+if st.button("Submit"):
+
+    if before_file and after_file:
+
+        db = Session()
+
+        before_bytes = before_file.read()
+        after_bytes = after_file.read()
+
+        # HASH
+        before_hash = get_hash(before_bytes)
+        after_hash = get_hash(after_bytes)
+
+        duplicate = db.query(Record).filter(
+            (Record.before_hash == before_hash) |
+            (Record.after_hash == after_hash)
+        ).first()
+
+        # IMAGE DIFFERENCE
+        diff_score = compare_images(before_bytes, after_bytes)
+
+        # TIME DIFFERENCE
+        now = datetime.now()
+        time_diff = abs((now - activity_time).total_seconds() / 60)
+
+        # STATUS LOGIC
+        status = "VALID"
+        if duplicate or diff_score < 10 or time_diff > 60:
+            status = "INVALID"
+
+        # SAVE RECORD
+        record = Record(
+            before_hash=before_hash,
+            after_hash=after_hash,
+            difference=diff_score,
+            time_diff=time_diff,
+            status=status
+        )
+
+        db.add(record)
+        db.commit()
+
+        # OUTPUT
+        st.success(f"Status: {status}")
+        st.write(f"Image Difference Score: {diff_score}")
+        st.write(f"Time Difference (minutes): {time_diff}")
+        st.write(f"Duplicate: {'Yes' if duplicate else 'No'}")
+
+# ---------------- DASHBOARD ----------------
+
+st.subheader("📊 Records Dashboard")
+
+db = Session()
+records = db.query(Record).all()
+
+data = []
+for r in records:
+    data.append({
+        "ID": r.id,
+        "Status": r.status,
+        "Difference": r.difference,
+        "Time Diff": r.time_diff
+    })
+
+if data:
+    st.dataframe(data)
+
+    # Simple chart
+    st.bar_chart([d["Difference"] for d in data])
+else:
+    st.info("No records yet")
