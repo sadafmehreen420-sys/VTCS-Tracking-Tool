@@ -1,76 +1,109 @@
+import streamlit as st
 import pandas as pd
 import numpy as np
-import streamlit as st
 
-# Haversine Distance Function
-def haversine(lat1, lon1, lat2, lon2):
-    R = 6371  # Earth radius in KM
-    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+# Page Configuration
+st.set_page_config(page_title="VTCS & GPS Auditor", layout="wide")
+st.title("🚛 VTCS & GPS Tracking Auditor")
+
+# --- SIDEBAR: FILE UPLOADS ---
+st.sidebar.header("Upload Data")
+vtcs_file = st.sidebar.file_uploader("1. Upload VTCS Data (Excel/CSV)", type=['xlsx', 'csv'])
+tracking_file = st.sidebar.file_uploader("2. Upload Tracking Report (Excel/CSV)", type=['xlsx', 'csv'])
+
+def process_audit(vtcs_df, track_df=None):
+    # --- 1. VTCS PROCESSING ---
+    # Weight Conversion
+    cols_to_fix = ['Waste Collected (Kg)', 'Before Weight', 'After Weight (Kg)']
+    for col in cols_to_fix:
+        if col in vtcs_df.columns:
+            vtcs_df[col] = pd.to_numeric(vtcs_df[col].astype(str).str.replace(',', ''), errors='coerce')
     
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
+    vtcs_df['Tonnage'] = vtcs_df['Waste Collected (Kg)'] / 1000
     
-    a = np.sin(dlat/2)**2 + np.cos(lat1)*np.cos(lat2)*np.sin(dlon/2)**2
-    c = 2*np.arcsin(np.sqrt(a))
+    # Time Conversion (Portal format: Mar 17, 2026, 2:01:12 PM)
+    vtcs_df['Time In'] = pd.to_datetime(vtcs_df['Time In'], errors='coerce')
+    vtcs_df['Time Out'] = pd.to_datetime(vtcs_df['Time Out'], errors='coerce')
     
-    return R * c
+    # 30-Minute Logic (Above 30 is Suspicious)
+    vtcs_df['Duration_Mins'] = (vtcs_df['Time Out'] - vtcs_df['Time In']).dt.total_seconds() / 60
+    vtcs_df['Time_Status'] = vtcs_df['Duration_Mins'].apply(lambda x: "🚨 Suspicious (>30m)" if x > 30 else "✅ Normal")
 
-st.header("2. Tracking Module")
+    # --- 2. GPS TRACKING CROSS-CHECK ---
+    if track_df is not None:
+        # Standardize Tracking Columns
+        # We assume tracking has 'Vehicle', 'Time', and 'Status'
+        track_df['Time'] = pd.to_datetime(track_df.iloc[:, 1], errors='coerce') # Assuming 2nd column is time
+        track_df.columns = [c.strip() for c in track_df.columns]
+        
+        # Merge Logic: Find GPS status at VTCS 'Time In'
+        # To handle seconds difference, we round to nearest minute
+        vtcs_df['Match_Time'] = vtcs_df['Time In'].dt.floor('min')
+        track_df['Match_Time'] = track_df['Time'].dt.floor('min')
+        
+        # Merge VTCS with Tracking on Vehicle and Time
+        merged = pd.merge(
+            vtcs_df, 
+            track_df[['Vehicle', 'Match_Time', 'Status']], 
+            on=['Vehicle', 'Match_Time'], 
+            how='left'
+        )
+        
+        # IDLE Logic: Check if GPS status matches "Idle" at Portal entry time
+        def check_idle(row):
+            gps_status = str(row['Status']).lower()
+            if 'idle' in gps_status:
+                return "✅ Verified (Idle)"
+            elif 'moving' in gps_status or 'active' in gps_status:
+                return "❌ Conflict (Moving)"
+            else:
+                return "❓ No GPS Data"
 
-tracking_file = st.file_uploader("Upload Tracking Report", type=["xlsx","csv"])
-coord_file = st.file_uploader("Upload TCP/WE Coordinates", type=["xlsx","csv"])
+        merged['GPS_Audit'] = merged.apply(check_idle, axis=1)
+        return merged
+    
+    return vtcs_df
 
-if tracking_file and coord_file:
+if vtcs_file:
+    df_vtcs = pd.read_excel(vtcs_file) if vtcs_file.name.endswith('xlsx') else pd.read_csv(vtcs_file)
+    
+    df_track = None
+    if tracking_file:
+        df_track = pd.read_excel(tracking_file) if tracking_file.name.endswith('xlsx') else pd.read_csv(tracking_file)
+    
+    # Run the Audit
+    results = process_audit(df_vtcs, df_track)
 
-    # Read files
-    tracking = pd.read_excel(tracking_file) if tracking_file.name.endswith("xlsx") else pd.read_csv(tracking_file)
-    coords = pd.read_excel(coord_file) if coord_file.name.endswith("xlsx") else pd.read_csv(coord_file)
+    # --- DASHBOARD UI ---
+    st.header("📋 Audit Dashboard")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total Tonnage (Day)", f"{results['Tonnage'].sum():.2f} Tons")
+    m2.metric("Delayed Trips (>30m)", len(results[results['Time_Status'].str.contains("🚨")]))
+    
+    if 'GPS_Audit' in results.columns:
+        conflicts = len(results[results['GPS_Audit'] == "❌ Conflict (Moving)"])
+        m3.metric("GPS Conflicts", conflicts)
 
-    # Clean column names (important)
-    tracking.columns = tracking.columns.str.strip().str.lower()
-    coords.columns = coords.columns.str.strip().str.lower()
+    # Vehicle Table
+    st.subheader("Vehicle Summary")
+    summary = results.groupby('Vehicle').agg({'Tonnage': 'sum', 'Data ID': 'count'}).rename(columns={'Data ID': 'Trips'})
+    st.table(summary)
 
-    # Rename columns to standard
-    tracking = tracking.rename(columns={
-        "vehicle": "vehicle",
-        "lat": "lat",
-        "long": "lon"
-    })
+    # Main Data Table
+    st.subheader("Detailed Logs")
+    
+    # Column selection for cleaner view
+    display_cols = ['Vehicle', 'Time In', 'Time Out', 'Duration_Mins', 'Tonnage', 'Time_Status']
+    if 'GPS_Audit' in results.columns:
+        display_cols.append('GPS_Audit')
 
-    coords = coords.rename(columns={
-        "name": "location",
-        "lat": "lat",
-        "long": "lon"
-    })
+    # Color highlighting
+    def color_rows(val):
+        if '🚨' in str(val) or '❌' in str(val): return 'background-color: #ffcccc'
+        if '✅' in str(val): return 'background-color: #ccffcc'
+        return ''
 
-    results = []
+    st.dataframe(results[display_cols].style.applymap(color_rows), use_container_width=True)
 
-    # Matching Logic
-    for _, t in tracking.iterrows():
-        for _, c in coords.iterrows():
-
-            dist = haversine(t['lat'], t['lon'], c['lat'], c['lon'])
-
-            if dist <= 0.2:  # 200 meters threshold
-                results.append({
-                    "Vehicle": t['vehicle'],
-                    "Location (TCP/WE)": c['location'],
-                    "Distance (KM)": round(dist, 3)
-                })
-
-    result_df = pd.DataFrame(results)
-
-    if not result_df.empty:
-        # Remove duplicates
-        result_df = result_df.drop_duplicates()
-
-        st.success("✅ Matching Completed Successfully")
-
-        st.dataframe(result_df)
-
-        # Download option
-        csv = result_df.to_csv(index=False).encode('utf-8')
-        st.download_button("Download Result", csv, "vehicle_tracking_result.csv")
-
-    else:
-        st.warning("❌ No vehicle matched with any TCP/WE location")
+else:
+    st.info("Please upload your VTCS file from the sidebar to start.")
