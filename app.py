@@ -1,117 +1,76 @@
-import streamlit as st
 import pandas as pd
 import numpy as np
+import streamlit as st
 
-# Page Configuration
-st.set_page_config(page_title="VTCS & GPS Auditor", layout="wide")
-st.title("🚛 VTCS & GPS Tracking Auditor") 
-
-# --- SIDEBAR: FILE UPLOADS ---
-st.sidebar.header("1. Primary Data")
-vtcs_file = st.sidebar.file_uploader("Upload VTCS Main Data", type=['xlsx', 'csv'])
-
-st.sidebar.header("2. Tracking Module Options")
-
-# Dropdown to select tracking source
-tracking_source = st.sidebar.selectbox(
-    "Select Tracking Source",
-    ["None", "Tracking Report", "TCP/WE Report"]
-)
-
-# Initialize variables for the processing function
-df_track = None
-df_tcp = None
-df_we = None
-
-# Show specific uploader based on dropdown choice
-if tracking_source == "Tracking Report":
-    tracking_file = st.sidebar.file_uploader("Upload Tracking Report", type=['xlsx', 'csv'])
-    if tracking_file:
-        df_track = pd.read_excel(tracking_file) if tracking_file.name.endswith('xlsx') else pd.read_csv(tracking_file)
-
-elif tracking_source == "TCP/WE Report":
-    # Sub-options if needed, or just a single uploader for the chosen report type
-    report_type = st.sidebar.radio("Report Type", ["TCP", "WE"])
-    we_tcp_file = st.sidebar.file_uploader(f"Upload {report_type} Report", type=['xlsx', 'csv'])
-    if we_tcp_file:
-        if report_type == "TCP":
-            df_tcp = pd.read_excel(we_tcp_file) if we_tcp_file.name.endswith('xlsx') else pd.read_csv(we_tcp_file)
-        else:
-            df_we = pd.read_excel(we_tcp_file) if we_tcp_file.name.endswith('xlsx') else pd.read_csv(we_tcp_file)
-
-def process_audit(vtcs_df, track_df=None, tcp_df=None, we_df=None):
-    # --- VTCS PROCESSING ---
-    cols_to_fix = ['Waste Collected (Kg)', 'Before Weight', 'After Weight (Kg)']
-    for col in cols_to_fix:
-        if col in vtcs_df.columns:
-            vtcs_df[col] = pd.to_numeric(vtcs_df[col].astype(str).str.replace(',', ''), errors='coerce')
+# Haversine Distance Function
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371  # Earth radius in KM
+    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
     
-    vtcs_df['Tonnage'] = vtcs_df.get('Waste Collected (Kg)', 0) / 1000
-    vtcs_df['Time In'] = pd.to_datetime(vtcs_df['Time In'], errors='coerce')
-    vtcs_df['Time Out'] = pd.to_datetime(vtcs_df['Time Out'], errors='coerce')
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
     
-    vtcs_df['Duration_Mins'] = (vtcs_df['Time Out'] - vtcs_df['Time In']).dt.total_seconds() / 60
-    vtcs_df['Time_Status'] = vtcs_df['Duration_Mins'].apply(lambda x: "🚨 Suspicious (>30m)" if x > 30 else "✅ Normal")
-
-    # Determine which tracking data to use
-    active_track = track_df if track_df is not None else (tcp_df if tcp_df is not None else we_df)
+    a = np.sin(dlat/2)**2 + np.cos(lat1)*np.cos(lat2)*np.sin(dlon/2)**2
+    c = 2*np.arcsin(np.sqrt(a))
     
-    if active_track is not None:
-        active_track.columns = [c.strip() for c in active_track.columns]
-        # Auto-detect time column
-        time_col = 'Time' if 'Time' in active_track.columns else active_track.columns[1]
-        active_track['Time_Parsed'] = pd.to_datetime(active_track[time_col], errors='coerce')
-        
-        vtcs_df['Match_Time'] = vtcs_df['Time In'].dt.floor('min')
-        active_track['Match_Time'] = active_track['Time_Parsed'].dt.floor('min')
-        
-        merged = pd.merge(
-            vtcs_df, 
-            active_track[['Vehicle', 'Match_Time', 'Status']] if 'Status' in active_track.columns else active_track[['Vehicle', 'Match_Time']], 
-            on=['Vehicle', 'Match_Time'], 
-            how='left'
-        )
-        
-        def check_status(row):
-            if 'Status' not in row or pd.isna(row['Status']):
-                return "❓ No GPS Match"
-            status = str(row['Status']).lower()
-            return "✅ Verified" if 'idle' in status else "❌ Conflict"
+    return R * c
 
-        merged['GPS_Audit'] = merged.apply(check_status, axis=1)
-        return merged
-    
-    return vtcs_df
+st.header("2. Tracking Module")
 
-if vtcs_file:
-    df_vtcs = pd.read_excel(vtcs_file) if vtcs_file.name.endswith('xlsx') else pd.read_csv(vtcs_file)
-    
-    # Run Audit with whichever file was uploaded
-    results = process_audit(df_vtcs, track_df=df_track, tcp_df=df_tcp, we_df=df_we)
+tracking_file = st.file_uploader("Upload Tracking Report", type=["xlsx","csv"])
+coord_file = st.file_uploader("Upload TCP/WE Coordinates", type=["xlsx","csv"])
 
-    # --- DASHBOARD UI ---
-    st.header("📋 Audit Dashboard")
-    if tracking_source != "None":
-        st.info(f"📊 Auditing using **{tracking_source}** data.")
+if tracking_file and coord_file:
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Total Tonnage", f"{results['Tonnage'].sum():.2f} Tons")
-    m2.metric("Delayed Trips", len(results[results['Time_Status'].str.contains("🚨")]))
-    
-    if 'GPS_Audit' in results.columns:
-        conflicts = len(results[results['GPS_Audit'].str.contains("❌")])
-        m3.metric("GPS Conflicts", conflicts)
+    # Read files
+    tracking = pd.read_excel(tracking_file) if tracking_file.name.endswith("xlsx") else pd.read_csv(tracking_file)
+    coords = pd.read_excel(coord_file) if coord_file.name.endswith("xlsx") else pd.read_csv(coord_file)
 
-    # Main Table
-    display_cols = ['Vehicle', 'Time In', 'Time Out', 'Duration_Mins', 'Tonnage', 'Time_Status']
-    if 'GPS_Audit' in results.columns:
-        display_cols.append('GPS_Audit')
+    # Clean column names (important)
+    tracking.columns = tracking.columns.str.strip().str.lower()
+    coords.columns = coords.columns.str.strip().str.lower()
 
-    def color_rows(val):
-        if '🚨' in str(val) or '❌' in str(val): return 'background-color: #ffcccc'
-        if '✅' in str(val): return 'background-color: #ccffcc'
-        return ''
+    # Rename columns to standard
+    tracking = tracking.rename(columns={
+        "vehicle": "vehicle",
+        "lat": "lat",
+        "long": "lon"
+    })
 
-    st.dataframe(results[display_cols].style.applymap(color_rows), use_container_width=True)
-else:
-    st.info("Please upload your VTCS file from the sidebar to start.")
+    coords = coords.rename(columns={
+        "name": "location",
+        "lat": "lat",
+        "long": "lon"
+    })
+
+    results = []
+
+    # Matching Logic
+    for _, t in tracking.iterrows():
+        for _, c in coords.iterrows():
+
+            dist = haversine(t['lat'], t['lon'], c['lat'], c['lon'])
+
+            if dist <= 0.2:  # 200 meters threshold
+                results.append({
+                    "Vehicle": t['vehicle'],
+                    "Location (TCP/WE)": c['location'],
+                    "Distance (KM)": round(dist, 3)
+                })
+
+    result_df = pd.DataFrame(results)
+
+    if not result_df.empty:
+        # Remove duplicates
+        result_df = result_df.drop_duplicates()
+
+        st.success("✅ Matching Completed Successfully")
+
+        st.dataframe(result_df)
+
+        # Download option
+        csv = result_df.to_csv(index=False).encode('utf-8')
+        st.download_button("Download Result", csv, "vehicle_tracking_result.csv")
+
+    else:
+        st.warning("❌ No vehicle matched with any TCP/WE location")
